@@ -1,131 +1,138 @@
-# HƯỚNG DẪN HỌC DOCKER NETWORK VÀ DOCKER VOLUME VỚI SPRING BOOT & MYSQL
+# HƯỚNG DẪN THỰC HÀNH DOCKER NETWORK & DOCKER VOLUME
+*(Dành riêng cho thực hành bằng dòng lệnh Docker CLI - Không dùng Docker Compose)*
 
-Tài liệu này được thiết kế để giúp bạn hiểu rõ bản chất của **Docker Network**, **Docker Volume**, cơ chế hoạt động của **Multi-stage Dockerfile**, và cách kết nối ứng dụng **Spring Boot (JPA)** với cơ sở dữ liệu **MySQL**.
+Tài liệu này hướng dẫn bạn cách hiểu và làm chủ **Docker Network** và **Docker Volume** thông qua việc triển khai ứng dụng **Spring Boot (JPA)** kết nối với **MySQL**.
 
 ---
 
-## 1. Phân Tích Lỗi Sai Của File Dockerfile Ban Đầu (Trong Ảnh)
+## 1. Hiểu Rõ Về Cấu Trúc File Dockerfile (3 Stages)
 
-Trong bức ảnh mẫu, Dockerfile được viết như sau:
+Trong file `Dockerfile`, chúng ta có 3 stages:
 
 ```dockerfile
-# Stage 1: Create MySQL database with mock data
+# Stage 1: Build Image MySQL chứa sẵn dữ liệu mẫu
 FROM mysql:8.0 AS mysql-db
-ENV MYSQL_ROOT_PASSWORD=root
-ENV MYSQL_DATABASE=taskdb
-COPY src/main/resources/db/taskdb.sql /docker-entrypoint-initdb.d/
+...
 
-# Stage 2: Build the application using Gradle
-FROM gradle:8.5-jdk21 AS build
+# Stage 2: Build file JAR từ mã nguồn Java bằng Gradle
+FROM eclipse-temurin:21-jdk-alpine AS build
 ...
-# Stage 3: Run the application
-FROM eclipse-temurin:21-jre-alpine
+
+# Stage 3: Chạy ứng dụng Spring Boot bằng JRE nhẹ
+FROM eclipse-temurin:21-jre-alpine AS app
 ...
-ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
-### Tại sao viết như vậy là SAI BẢN CHẤT?
-
-1. **Hiểu lầm về Multi-stage Build:**
-   - Multi-stage build trong Docker dùng để **tối ưu dung lượng của 1 Image duy nhất** (Stage 1 build code $\rightarrow$ Stage 2 chép file JAR sang để chạy).
-   - Lệnh `docker build` chỉ tạo ra **duy nhất 1 Image** từ stage cuối cùng (`Stage 3`).
-   - Stage 1 `FROM mysql:8.0 AS mysql-db` hoàn toàn **bị bỏ qua**, nó **KHÔNG** hề sinh ra một MySQL container chạy ngầm nào cả!
-2. **Lỗi khi chạy ứng dụng:**
-   - Khi bạn chạy image được build ra, chỉ có file `app.jar` chạy.
-   - Khi Spring Boot khởi động và tìm kết nối tới `jdbc:mysql://mysql-db:3306/...`, hệ thống sẽ văng lỗi **Communications link failure** hoặc **UnknownHostException: mysql-db** vì không có bất kỳ container MySQL nào đang chạy.
-3. **Quy tắc cốt lõi của Docker:**
-   - **Mỗi Container chỉ chịu trách nhiệm cho 1 dịch vụ (Single Concern):** 1 container chạy MySQL riêng, 1 container chạy Spring Boot riêng.
-   - Để 2 container giao tiếp được với nhau $\rightarrow$ Cần **Docker Network**.
-   - Để dữ liệu MySQL không bị biến mất khi tắt/xóa container $\rightarrow$ Cần **Docker Volume**.
+### Tại sao lại gộp cả MySQL và Spring Boot vào chung 1 file Dockerfile?
+* Bình thường, lệnh `docker build -t my-spring-image .` sẽ chạy đến stage cuối cùng (`Stage 3`) để tạo ra image của **Spring Boot**.
+* Nhưng Docker hỗ trợ cờ `--target <stage-name>`. Khi bạn gõ:
+  ```bash
+  docker build --target mysql-db -t my-mysql-image .
+  ```
+  Docker sẽ **chỉ chạy Stage 1** và tạo ra ngay một image MySQL chứa sẵn file script SQL dữ liệu mẫu!
+* **Quy tắc vàng:** Dù nằm chung trong 1 file `Dockerfile`, khi chạy chúng ta vẫn phải chạy thành **2 container riêng biệt** (1 container chạy MySQL và 1 container chạy Spring Boot). Để 2 container này nói chuyện được với nhau, chúng ta sử dụng **Docker Network**; và để giữ dữ liệu MySQL không bị mất, ta dùng **Docker Volume**.
 
 ---
 
-## 2. Kiến Thức Trọng Tâm: Docker Network & Docker Volume
+## 2. Kiến Thức Cốt Lõi Cần Nhớ
 
-### 2.1. Docker Network là gì? Tại sao cần?
-- Mặc định, mỗi container chạy trong một môi trường cô lập.
-- Khi tạo một mạng bridge do người dùng tự định nghĩa (**User-defined Bridge Network**):
-  ```bash
-  docker network create devops-net
-  ```
-- **Tính năng quan trọng nhất:** **Automatic DNS Resolution (Tự động phân giải tên miền nội bộ)**.
-  - Container Spring Boot có thể kết nối đến MySQL thông qua chính **tên container** (`container_name`) thay vì phải mò địa chỉ IP động.
-  - Ví dụ: đặt tên container MySQL là `mysql-db`, thì trong Spring Boot chỉ cần đặt URL là `jdbc:mysql://mysql-db:3306/productdb`.
+### 2.1. Docker Network là gì?
+* Mỗi container khi tạo ra mặc định nằm trong mạng cô lập.
+* Khi ta tạo mạng riêng (`docker network create devops-net`) và đưa 2 container vào chung mạng này:
+  * Hai container có thể giao tiếp với nhau qua **chính tên container** (tính năng DNS nội bộ của Docker).
+  * Trong Spring Boot, URL kết nối chỉ cần ghi:
+    `jdbc:mysql://mysql-db:3306/productdb`
+    *(trong đó `mysql-db` là tên container MySQL).*
 
-### 2.2. Docker Volume là gì? Tại sao cần?
-- Các container có tính chất **ephemeral (tạm thời)**: Nếu bạn xóa container (`docker rm -f mysql-db`), toàn bộ dữ liệu database bên trong sẽ bị xóa sạch theo.
-- **Docker Volume** lưu trữ dữ liệu tại một phân vùng an toàn trên máy chủ (Host OS) nằm ngoài vòng đời của container:
-  ```bash
-  docker volume create mysql_data
-  ```
-- Khi mount volume này vào thư mục lưu trữ dữ liệu của MySQL (`/var/lib/mysql`):
-  - Dù container MySQL bị `docker stop`, `docker rm` hay crash, dữ liệu vẫn còn nguyên vẹn trên volume.
-  - Khi tạo một container MySQL mới và gắn lại volume này, toàn bộ dữ liệu trước đó được khôi phục ngay lập tức.
+### 2.2. Docker Volume là gì?
+* Container có tính chất tạm thời: nếu bạn xóa container (`docker rm`), toàn bộ database bên trong container cũng biến mất hoàn toàn.
+* **Docker Volume** tạo ra một vùng lưu trữ độc lập trên máy chủ host (`docker volume create mysql_data`).
+* Khi ta gắn volume này vào thư mục lưu trữ của MySQL (`/var/lib/mysql`), thì dù container MySQL có bị xóa đi và tạo lại bao nhiêu lần, dữ liệu bảng và bản ghi vẫn còn nguyên vẹn 100%!
 
 ---
 
-## 3. Thực Hành Cách 1: Sử Dụng Lệnh Docker CLI (Khuyên Dùng Để Học Bản Chất)
+## 3. Các Bước Thực Hành Chi Tiết Bằng Dòng Lệnh
 
-Mở terminal tại thư mục gốc của project (`session10-springboot`):
+Mở **PowerShell** hoặc **Terminal** tại thư mục dự án (`session10-springboot`):
 
-### Bước 1: Build Docker Image cho Spring Boot
+### Bước 1: Build 2 Docker Image từ Dockerfile
+
+#### 1.1. Build Image MySQL (dùng cờ `--target mysql-db`):
 ```bash
-docker build -t springboot-product-app .
+docker build --target mysql-db -t my-mysql-image .
 ```
-*(Lệnh này sử dụng file Dockerfile đã được tối ưu: dùng Gradle wrapper biên dịch và đóng gói bằng JRE 21 alpine).*
 
-### Bước 2: Tạo Docker Network
+#### 1.2. Build Image Spring Boot (chạy toàn bộ Dockerfile):
+```bash
+docker build -t my-spring-image .
+```
+
+*Kiểm tra 2 image vừa tạo:*
+```bash
+docker images
+```
+
+---
+
+### Bước 2: Tạo Docker Network và Docker Volume
+
+#### 2.1. Tạo mạng chung cho 2 container:
 ```bash
 docker network create devops-net
 ```
-*Kiểm tra danh sách network:*
-```bash
-docker network ls
-```
 
-### Bước 3: Tạo Docker Volume
+#### 2.2. Tạo volume để lưu trữ dữ liệu MySQL bền vững:
 ```bash
 docker volume create mysql_data
 ```
-*Kiểm tra danh sách volume:*
+
+*Kiểm tra:*
 ```bash
+docker network ls
 docker volume ls
 ```
 
-### Bước 4: Chạy Container MySQL (Gắn cả Network và Volume)
+---
 
-> **Lưu ý trên Windows PowerShell:** Dùng `${PWD}` để lấy đường dẫn hiện tại:
+### Bước 3: Khởi chạy Container MySQL
 
+Chạy container MySQL với tên là `mysql-db`, gắn vào mạng `devops-net` và volume `mysql_data`:
+
+**Lệnh chạy trên Windows PowerShell:**
 ```powershell
 docker run -d `
   --name mysql-db `
   --network devops-net `
   -v mysql_data:/var/lib/mysql `
-  -v ${PWD}/src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro `
   -e MYSQL_ROOT_PASSWORD=root `
   -e MYSQL_DATABASE=productdb `
   -p 3306:3306 `
-  mysql:8.0
+  my-mysql-image
 ```
 
-*(Nếu bạn dùng Git Bash hoặc Linux, thay `${PWD}` bằng `$(pwd)` và đổi dấu `` ` `` thành `\`)*
+*(Nếu bạn dùng Git Bash hoặc Linux/macOS, hãy đổi dấu `` ` `` thành dấu `\`)*
 
-- **Giải thích các tham số:**
-  - `--name mysql-db`: Đặt tên container là `mysql-db`.
-  - `--network devops-net`: Gắn container vào mạng `devops-net`.
-  - `-v mysql_data:/var/lib/mysql`: Gắn Docker Volume để giữ dữ liệu bền vững.
-  - `-v .../init.sql:/docker-entrypoint-initdb.d/init.sql:ro`: File SQL mock data sẽ tự động được chạy khi database khởi tạo lần đầu.
-  - `-e MYSQL_ROOT_PASSWORD=root`: Mật khẩu tài khoản root.
-  - `-e MYSQL_DATABASE=productdb`: Tên database.
+**Giải thích các tham số:**
+* `-d`: Chạy ngầm (detached mode).
+* `--name mysql-db`: Đặt tên container là `mysql-db` (đây cũng chính là hostname trong mạng nội bộ).
+* `--network devops-net`: Cho container gia nhập mạng `devops-net`.
+* `-v mysql_data:/var/lib/mysql`: Gắn volume `mysql_data` vào thư mục dữ liệu của MySQL.
+* `-p 3306:3306`: Mở cổng 3306 để có thể kết nối từ máy thật (DBeaver, MySQL Workbench nếu cần).
+* `my-mysql-image`: Tên image MySQL đã build ở Bước 1.1.
 
-Kiểm tra log của MySQL xem đã sẵn sàng chưa:
+*Kiểm tra xem MySQL đã sẵn sàng nhận kết nối chưa:*
 ```bash
 docker logs -f mysql-db
 ```
-*(Khi thấy thông báo `ready for connections`, nhấn `Ctrl + C` để thoát log).*
+*(Khi thấy dòng chữ `ready for connections`, nhấn tổ hợp phím `Ctrl + C` để thoát màn hình xem log).*
 
-### Bước 5: Chạy Container Spring Boot (Gắn cùng Network với MySQL)
+---
 
+### Bước 4: Khởi chạy Container Spring Boot
+
+Chạy container Spring Boot và cho nó kết nối tới MySQL thông qua hostname `mysql-db`:
+
+**Lệnh chạy trên Windows PowerShell:**
 ```powershell
 docker run -d `
   --name product-service `
@@ -134,35 +141,37 @@ docker run -d `
   -e SPRING_DATASOURCE_URL="jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true" `
   -e SPRING_DATASOURCE_USERNAME=root `
   -e SPRING_DATASOURCE_PASSWORD=root `
-  springboot-product-app
+  my-spring-image
 ```
 
-- **Điểm mấu chốt ở đây:** URL kết nối là `jdbc:mysql://mysql-db:3306/productdb`. Nhờ có `--network devops-net`, Spring Boot sẽ phân giải được `mysql-db` trỏ thẳng tới IP nội bộ của MySQL container!
-
-Xem log Spring Boot khởi động:
+*Theo dõi quá trình Spring Boot khởi động:*
 ```bash
 docker logs -f product-service
 ```
-Bạn sẽ thấy dòng log:
-`Đã khởi tạo 4 sản phẩm vào cơ sở dữ liệu MySQL!` và `Started Session10SpringbootApplication`.
+Bạn sẽ thấy log Spring Boot kết nối thành công tới MySQL và khởi tạo dữ liệu:
+```text
+Đã khởi tạo 4 sản phẩm vào cơ sở dữ liệu MySQL!
+Started Session10SpringbootApplication in ... seconds
+```
+*(Nhấn `Ctrl + C` để thoát xem log).*
 
 ---
 
-## 4. Kiểm Tra Kết Quả (Test API)
+### Bước 5: Kiểm tra kết quả (Test API)
 
-Mở trình duyệt hoặc sử dụng cURL / Postman:
+Mở trình duyệt web hoặc dùng lệnh cURL để lấy danh sách sản phẩm từ MySQL:
 
-**Địa chỉ API:**
+**URL truy cập:**
 ```
-GET http://localhost:8080/api/products
+http://localhost:8080/api/products
 ```
 
-**Dùng cURL trong terminal:**
+**Hoặc chạy cURL trong terminal:**
 ```bash
 curl http://localhost:8080/api/products
 ```
 
-**Dữ liệu JSON trả về từ MySQL:**
+**Dữ liệu JSON nhận được từ MySQL:**
 ```json
 [
   {
@@ -194,15 +203,17 @@ curl http://localhost:8080/api/products
 
 ---
 
-## 5. Thí Nghiệm Chứng Minh Sức Mạnh Của Docker Volume
+## 4. Thí Nghiệm Kiểm Chứng Docker Volume (Thực Hành Rất Quan Trọng)
 
-Hãy thực hiện thí nghiệm này để hiểu tại sao Docker Volume quan trọng:
+Để chứng minh **Docker Volume** thực sự bảo vệ dữ liệu khi container bị mất:
 
 1. **Xóa hoàn toàn container MySQL:**
    ```bash
    docker rm -f mysql-db
    ```
-2. **Khởi chạy một container MySQL mới tinh, vẫn mount vào volume `mysql_data` cũ:**
+   *(Lúc này container MySQL đã bị hủy hoàn toàn).*
+
+2. **Tạo lại một container MySQL mới tinh, vẫn trỏ vào volume `mysql_data`:**
    ```powershell
    docker run -d `
      --name mysql-db `
@@ -211,60 +222,46 @@ Hãy thực hiện thí nghiệm này để hiểu tại sao Docker Volume quan 
      -e MYSQL_ROOT_PASSWORD=root `
      -e MYSQL_DATABASE=productdb `
      -p 3306:3306 `
-     mysql:8.0
+     my-mysql-image
    ```
-3. **Gọi lại API:**
+
+3. **Gọi lại API để kiểm tra:**
    ```bash
    curl http://localhost:8080/api/products
    ```
-   $\rightarrow$ **Kết quả:** Dữ liệu sản phẩm vẫn còn nguyên 100%! Không hề bị mất đi dù container cũ đã bị hủy. Đó chính là nhờ **Docker Volume**.
+   $\rightarrow$ **Kết quả:** Dữ liệu vẫn còn nguyên vẹn 100%! Không hề bị mất đi. Đó chính là giá trị cốt lõi của **Docker Volume**.
 
 ---
 
-## 6. Thực Hành Cách 2: Triển Khai Nhanh Với Docker Compose
+## 5. Dọn Dẹp Sau Khi Học Xong (Clean Up)
 
-Trong thực tế doanh nghiệp, người ta dùng `docker-compose` để tự động hóa toàn bộ các bước tạo Network, Volume và chạy đồng thời các container chỉ bằng **1 lệnh duy nhất**.
+Khi học xong, bạn có thể dọn dẹp các tài nguyên:
 
-Tệp `docker-compose.yml` đã được cấu hình sẵn trong project.
+```bash
+# 1. Dừng và xóa 2 container
+docker rm -f product-service mysql-db
 
-### Các lệnh quản lý:
+# 2. Xóa mạng devops-net
+docker network rm devops-net
 
-1. **Khởi chạy toàn bộ hệ thống (build image + tạo network + tạo volume + chạy container):**
-   ```bash
-   docker compose up -d --build
-   ```
+# 3. Xóa volume mysql_data (chỉ chạy khi muốn xóa toàn bộ dữ liệu database)
+docker volume rm mysql_data
 
-2. **Theo dõi log của toàn bộ hệ thống:**
-   ```bash
-   docker compose logs -f
-   ```
-
-3. **Theo dõi riêng log của Spring Boot:**
-   ```bash
-   docker compose logs -f product-service
-   ```
-
-4. **Dừng hệ thống (Dữ liệu trong Volume vẫn được bảo lưu):**
-   ```bash
-   docker compose down
-   ```
-
-5. **Dừng hệ thống và XÓA CẢ VOLUME (chỉ dùng khi muốn reset sạch dữ liệu):**
-   ```bash
-   docker compose down -v
-   ```
+# 4. Xóa 2 image đã build (nếu muốn giải phóng dung lượng ổ đĩa)
+docker rmi my-spring-image my-mysql-image
+```
 
 ---
 
-## 7. Tổng Kết Các Thay Đổi Trong Dự Án
+## 6. Bảng Tra Cứu Nhanh Các Lệnh Docker CLI Đã Học
 
-| Thành phần | Chi tiết đã thực hiện |
+| Thao tác | Lệnh Docker CLI |
 | :--- | :--- |
-| **build.gradle** | Thêm thư viện `spring-boot-starter-data-jpa` và driver `mysql-connector-j`. |
-| **Product.java** | Đánh dấu entity với `@Entity`, `@Table(name = "products")`, `@Id`, `@GeneratedValue`. |
-| **ProductRepository.java** | Kế thừa `JpaRepository<Product, Long>` để thao tác cơ sở dữ liệu. |
-| **ProductController.java** | Gọi `productRepository.findAll()` để trả về dữ liệu lấy trực tiếp từ MySQL. |
-| **DataInitializer.java** | Tự động thêm dữ liệu mẫu ban đầu nếu bảng trong MySQL chưa có dữ liệu. |
-| **init.sql** | File SQL mẫu tạo database và nạp dữ liệu ban đầu cho MySQL container. |
-| **Dockerfile** | Viết lại chuẩn Multi-stage build (Stage 1: Build JAR, Stage 2: JRE Runtime). |
-| **docker-compose.yml** | Khai báo 2 services `mysql-db` & `product-service`, kèm `networks` và `volumes`. |
+| **Build riêng 1 stage** | `docker build --target <tên-stage> -t <tên-image> .` |
+| **Build toàn bộ Dockerfile** | `docker build -t <tên-image> .` |
+| **Tạo Network** | `docker network create <tên-network>` |
+| **Tạo Volume** | `docker volume create <tên-volume>` |
+| **Gắn container vào mạng** | `--network <tên-network>` trong `docker run` |
+| **Gắn volume vào container** | `-v <tên-volume>:<đường-dẫn-trong-container>` |
+| **Xem log container** | `docker logs -f <tên-container>` |
+| **Xóa container đang chạy** | `docker rm -f <tên-container>` |

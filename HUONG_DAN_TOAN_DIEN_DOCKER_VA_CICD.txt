@@ -1,0 +1,834 @@
+====================================================================================================
+                        TÀI LIỆU HƯỚNG DẪN THỰC HÀNH DEVOPS TỪ ĐẦU ĐẾN CUỐI
+           DOCKER MULTI-STAGE, DOCKER COMPOSE, GITHUB ACTIONS CI/CD VÀ QUẢN LÝ SERVER VPS
+====================================================================================================
+
+MỤC LỤC CHI TIẾT:
+----------------------------------------------------------------------------------------------------
+PHẦN 1: TỔNG QUAN HỆ THỐNG VÀ KIẾN TRÚC DỰ ÁN (SPRING BOOT + MYSQL)
+PHẦN 2: DOCKERFILE MULTI-STAGE VÀ DEMO THỰC HÀNH DÒNG LỆNH DOCKER TRÊN VPS
+   2.1. Bản chất và lợi ích của Multi-stage Build trong Docker
+   2.2. Phân tích cấu trúc file Dockerfile 3-stage của dự án
+   2.3. Quy trình thực hành dòng lệnh Docker CLI (Build, Network, Volume, Run)
+   2.4. Thí nghiệm kiểm chứng độ bền vững của Docker Volume (Data Persistence)
+PHẦN 3: TỐI ƯU HÓA VẬN HÀNH VỚI DOCKER COMPOSE
+   3.1. Tại sao phải nâng cấp từ Docker CLI lên Docker Compose?
+   3.2. Phân tích chi tiết cấu hình file docker-compose.yml
+   3.3. Cơ chế Healthcheck & Service Dependency chống Crash khi khởi động
+   3.4. Các lệnh quản lý Docker Compose thường dùng
+PHẦN 4: THIẾT LẬP PIPELINE CI/CD TỰ ĐỘNG HÓA VỚI GITHUB ACTIONS
+   4.1. Kiến trúc luồng tự động CI/CD (3 Jobs: Test -> Build/Push -> Deploy)
+   4.2. Hướng dẫn thiết lập SSH Key Pair (id_rsa / id_rsa.pub) kết nối an toàn với VPS
+   4.3. Hướng dẫn lấy Token Docker Hub và bảo mật biến môi trường với GitHub Secrets
+   4.4. Phân tích chi tiết mã nguồn file workflow .github/workflows/cicd.yml
+   4.5. Hướng dẫn kích hoạt và kiểm tra kết quả Deploy lên VPS
+PHẦN 5: TỔNG HỢP CẨM NANG TOÀN BỘ CÂU LỆNH QUẢN LÝ DOCKER (CHEAT SHEET)
+   5.1. Nhóm lệnh Docker Build & Images
+   5.2. Nhóm lệnh Docker Containers (Run, Logs, Exec, Monitor)
+   5.3. Nhóm lệnh Docker Network
+   5.4. Nhóm lệnh Docker Volume
+   5.5. Nhóm lệnh Dọn dẹp & Giải phóng hệ thống (System Cleanup)
+====================================================================================================
+
+
+====================================================================================================
+PHẦN 1: TỔNG QUAN HỆ THỐNG VÀ KIẾN TRÚC DỰ ÁN (SPRING BOOT + MYSQL)
+====================================================================================================
+
+1.1. Bối cảnh dự án:
+- Ứng dụng Backend: Spring Boot 3.x, viết bằng Java 21, quản lý build bằng Gradle (Gradle Wrapper).
+- Cơ sở dữ liệu: MySQL 8.0, lưu trữ bảng dữ liệu sản phẩm `products` trong database `productdb`.
+- ORM/JPA: Spring Data JPA (Hibernate) tự động cập nhật schema (`ddl-auto: update`).
+- Cổng dịch vụ mặc định:
+  + Backend Spring Boot: Cổng 8093 (hoặc 8080 tùy cấu hình server.port trong application.yaml).
+  + Database MySQL: Cổng 3306.
+
+1.2. Mục tiêu đặt ra trong bài thực hành / đề thi:
+- Đóng gói ứng dụng Spring Boot bằng Dockerfile tối ưu (Multi-stage build).
+- Chạy thử nghiệm thành công bằng câu lệnh Docker thuần (Docker CLI) với Docker Network và Docker Volume.
+- Tự động hóa việc cấu hình và chạy nhiều container cùng lúc bằng Docker Compose.
+- Thiết lập quy trình CI/CD hoàn chỉnh trên GitHub Actions:
+  + Mỗi khi push code lên nhánh `main`, pipeline tự động chạy Test -> Build Docker Image -> Push lên Docker Hub -> SSH vào VPS deploy container mới.
+- Quản lý bảo mật các thông tin nhạy cảm (Username, Token Docker Hub, SSH Key, IP Server) qua GitHub Secrets.
+
+
+====================================================================================================
+PHẦN 2: DOCKERFILE MULTI-STAGE VÀ DEMO THỰC HÀNH DÒNG LỆNH DOCKER TRÊN VPS
+====================================================================================================
+
+2.1. BẢN CHẤT VÀ LỢI ÍCH CỦA MULTI-STAGE BUILD
+----------------------------------------------------------------------------------------------------
+Trong cách tiếp cận truyền thống (Single-stage), toàn bộ bộ công cụ JDK (Java Development Kit), Gradle,
+mã nguồn source code, file rác build trung gian đều bị đóng gói vào image cuối cùng. Hậu quả là:
+- Kích thước image quá nặng (thường > 800MB - 1GB).
+- Nguy cơ bảo mật: Mã nguồn gốc và công cụ lập trình nằm ngay trong container production.
+- Tốc độ tải (pull/push) lên registry rất chậm.
+
+Multi-stage build giải quyết triệt để vấn đề này:
+- Stage Build (Tầng xây dựng): Dùng image chứa đầy đủ JDK và Gradle để biên dịch mã nguồn thành file JAR.
+- Stage App/Runtime (Tầng chạy ứng dụng): Dùng image JRE (Java Runtime Environment) siêu nhẹ (Alpine Linux),
+  chỉ copy DUY NHẤT file `.jar` đã đóng gói từ Stage Build sang. Kích thước image giảm chỉ còn ~150MB - 200MB!
+
+2.2. PHÂN TÍCH CẤU TRÚC FILE DOCKERFILE CỦA DỰ ÁN
+----------------------------------------------------------------------------------------------------
+Nội dung file Dockerfile được thiết kế gồm các stage như sau:
+
+```dockerfile
+# ------------------------------------------------------------------------------
+# Stage 1: Build Image MySQL chứa sẵn dữ liệu mẫu Mock data (Tùy chọn)
+# Lệnh build riêng stage này: docker build --target mysql-db -t my-mysql-image .
+# ------------------------------------------------------------------------------
+FROM mysql:8.0 AS mysql-db
+ENV MYSQL_ROOT_PASSWORD=root
+ENV MYSQL_DATABASE=productdb
+# Copy file SQL vào thư mục docker-entrypoint-initdb.d để MySQL tự động import khi khởi tạo
+COPY src/main/resources/db/init.sql /docker-entrypoint-initdb.d/
+
+# ------------------------------------------------------------------------------
+# Stage 2: Biên dịch ứng dụng Spring Boot bằng Gradle (Build Stage)
+# ------------------------------------------------------------------------------
+FROM eclipse-temurin:21-jdk-alpine AS build
+WORKDIR /app
+
+# Tận dụng Docker Layer Caching: Copy các file cấu hình và wrapper trước
+COPY gradlew .
+COPY gradle ./gradle
+COPY build.gradle settings.gradle ./
+
+# Cấp quyền thực thi cho gradlew và tải trước các thư viện dependencies
+RUN chmod +x gradlew
+RUN ./gradlew dependencies --no-daemon || true
+
+# Copy toàn bộ mã nguồn và build ra file JAR (bỏ qua test khi đóng gói image)
+COPY src ./src
+RUN ./gradlew bootJar -x test --no-daemon
+
+# ------------------------------------------------------------------------------
+# Stage 3: Chạy ứng dụng với JRE siêu nhẹ (Runtime Stage)
+# Lệnh build mặc định: docker build -t product-service:latest .
+# ------------------------------------------------------------------------------
+FROM eclipse-temurin:21-jre-alpine AS app
+WORKDIR /app
+
+# Copy file jar thành phẩm từ Stage 2 sang Stage 3
+COPY --from=build /app/build/libs/*.jar app.jar
+
+# Khai báo port ứng dụng
+EXPOSE 8093
+
+# Khai báo các biến môi trường mặc định kết nối Database qua mạng Docker Network
+ENV SPRING_DATASOURCE_URL=jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+ENV SPRING_DATASOURCE_USERNAME=root
+ENV SPRING_DATASOURCE_PASSWORD=root
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+* Kỹ thuật tối ưu Layer Cache trong Dockerfile:
+  Ta copy `gradlew`, `build.gradle` và chạy tải dependencies trước khi copy thư mục `src`. Khi bạn sửa code
+  trong `src`, Docker sẽ tái sử dụng cache của bước tải thư viện, giúp thời gian build các lần sau chỉ mất vài giây!
+
+2.3. QUY TRÌNH THỰC HÀNH BẰNG DÒNG LỆNH DOCKER CLI (TRÊN VPS HOẶC MÁY LOCAL)
+----------------------------------------------------------------------------------------------------
+
+BƯỚC 1: TẠO MẠNG DOCKER (NETWORK) VÀ VÙNG LƯU TRỮ (VOLUME)
+Mở terminal/SSH trên VPS:
+
+1. Tạo mạng cầu nối (Bridge Network):
+   docker network create my-network
+
+   -> Ý nghĩa: Cho phép các container trong cùng mạng tìm thấy nhau thông qua TÊN CONTAINER (DNS nội bộ).
+      Nhờ đó, Spring Boot chỉ cần kết nối tới `mysql-db:3306` thay vì phải dò IP động.
+
+2. Tạo ổ đĩa lưu trữ bền vững (Docker Volume):
+   docker volume create mysql-data
+
+   -> Ý nghĩa: Tạo thư mục lưu trữ tách biệt trên máy host. Dữ liệu bảng và record của MySQL sẽ nằm ở đây,
+      không bị mất khi container bị xóa.
+
+BƯỚC 2: BUILD DOCKER IMAGE
+Tại thư mục chứa dự án (nơi có file Dockerfile):
+
+1. Build Image cho Backend Spring Boot:
+   docker build -t product-service:v1 .
+
+   *(Nếu muốn build riêng stage MySQL mock data: docker build --target mysql-db -t my-mysql-image .)*
+
+BƯỚC 3: KHỞI CHẠY CONTAINER MYSQL
+Chạy lệnh khởi tạo database container gắn kèm Network và Volume:
+
+   docker run -d \
+     --name mysql-db \
+     --network my-network \
+     -v mysql-data:/var/lib/mysql \
+     -e MYSQL_ROOT_PASSWORD=root \
+     -e MYSQL_DATABASE=productdb \
+     -p 3306:3306 \
+     mysql:8.0
+
+   Giải thích tham số:
+   - `-d`: Chạy ngầm trong nền (detached).
+   - `--name mysql-db`: Đặt tên container là `mysql-db` (đây cũng là hostname cho Spring Boot kết nối).
+   - `--network my-network`: Đưa container vào mạng nội bộ chung.
+   - `-v mysql-data:/var/lib/mysql`: Gắn volume `mysql-data` vào thư mục data của MySQL.
+   - `-e MYSQL_ROOT_PASSWORD=root`: Thiết lập mật khẩu tài khoản root của database.
+   - `-e MYSQL_DATABASE=productdb`: Tự động tạo cơ sở dữ liệu `productdb`.
+   - `-p 3306:3306`: Map port 3306 ra ngoài host để dễ dàng truy cập từ tool DBeaver / Navicat.
+
+Kiểm tra log MySQL sẵn sàng hoạt động:
+   docker logs -f mysql-db
+   (Khi thấy dòng: "ready for connections", nhấn Ctrl + C để thoát).
+
+BƯỚC 4: IMPORT DỮ LIỆU MẪU VÀO MYSQL (NẾU CHƯA CÓ)
+Nếu bạn dùng image chuẩn `mysql:8.0`, hãy import file SQL mẫu từ máy host vào:
+   docker exec -i mysql-db mysql -u root -proot productdb < src/main/resources/db/init.sql
+
+Kiểm tra dữ liệu đã vào bảng products:
+   docker exec -it mysql-db mysql -u root -proot -e "USE productdb; SELECT * FROM products;"
+
+BƯỚC 5: KHỞI CHẠY CONTAINER SPRING BOOT
+Chạy container backend và kết nối với container database:
+
+   docker run -d \
+     --name product-service \
+     --network my-network \
+     -p 8093:8093 \
+     -e SPRING_DATASOURCE_URL="jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true" \
+     -e SPRING_DATASOURCE_USERNAME=root \
+     -e SPRING_DATASOURCE_PASSWORD=root \
+     product-service:v1
+
+   Kiểm tra log khởi động:
+   docker logs -f product-service
+   (Khi thấy thông báo: "Started Session10SpringbootApplication in ... seconds", ứng dụng đã chạy thành công).
+
+BƯỚC 6: KIỂM TRA KẾT QUẢ API
+Truy cập qua trình duyệt web hoặc dùng cURL:
+   curl http://localhost:8093/api/products
+   (Hoặc nếu chạy trên VPS: curl http://<IP_VPS>:8093/api/products)
+
+Kết quả trả về danh sách JSON sản phẩm chứng minh kết nối giữa 2 container đã thông suốt 100%!
+
+2.4. THÍ NGHIỆM KIỂM CHỨNG DOCKER VOLUME (DATA PERSISTENCE)
+----------------------------------------------------------------------------------------------------
+Để chứng minh dữ liệu không bao giờ bị mất nhờ Docker Volume:
+
+Bước 1: Xóa hoàn toàn container MySQL đang chạy:
+   docker rm -f mysql-db
+
+Bước 2: Tạo lại một container MySQL mới tinh và gán lại vào volume `mysql-data`:
+   docker run -d \
+     --name mysql-db \
+     --network my-network \
+     -v mysql-data:/var/lib/mysql \
+     -e MYSQL_ROOT_PASSWORD=root \
+     -e MYSQL_DATABASE=productdb \
+     -p 3306:3306 \
+     mysql:8.0
+
+Bước 3: Gọi lại API kiểm tra:
+   curl http://localhost:8093/api/products
+
+Kết quả: Toàn bộ danh sách sản phẩm vẫn còn nguyên vẹn 100%. Đó là giá trị cốt lõi của Docker Volume.
+
+
+====================================================================================================
+PHẦN 3: TỐI ƯU HÓA VẬN HÀNH VỚI DOCKER COMPOSE
+====================================================================================================
+
+3.1. TẠI SAO PHẢI DÙNG DOCKER COMPOSE?
+----------------------------------------------------------------------------------------------------
+Ở Phần 2, để chạy hoàn chỉnh hệ thống, bạn phải thực hiện thủ công 5 bước dòng lệnh:
+1. Tạo network
+2. Tạo volume
+3. Build image
+4. Chạy container MySQL với hàng loạt biến môi trường dài ngoằng
+5. Chạy container Spring Boot với hàng loạt cờ cấu hình
+
+Nhược điểm: Rất tốn thời gian, dễ gõ sai chính tả biến môi trường, khó chia sẻ giữa các thành viên trong nhóm.
+Docker Compose giúp giải quyết: Gom toàn bộ hạ tầng (Service, Network, Volume, Dependencies) vào DUY NHẤT
+file `docker-compose.yml`. Khởi động toàn bộ chỉ bằng: `docker compose up -d`.
+
+3.2. PHÂN TÍCH CHI TIẾT FILE DOCKER-COMPOSE.YML
+----------------------------------------------------------------------------------------------------
+Nội dung file `docker-compose.yml` chuẩn của dự án:
+
+```yaml
+services:
+  # ========================================================
+  # Service 1: MySQL Database
+  # ========================================================
+  mysql-db:
+    image: mysql:8.0
+    container_name: mysql-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: productdb
+    ports:
+      - "3306:3306"
+    volumes:
+      # [Docker Volume]: Lưu trữ bền vững dữ liệu database
+      - mysql-data:/var/lib/mysql
+      # [Bind Mount]: Tự động mount file init.sql để nạp dữ liệu mẫu lần đầu
+      - ./src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - my-network
+    # Cấu hình Healthcheck để báo hiệu khi nào MySQL thực sự sẵn sàng
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ========================================================
+  # Service 2: Spring Boot Backend Application
+  # ========================================================
+  product-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    container_name: product-service
+    restart: always
+    depends_on:
+      mysql-db:
+        condition: service_healthy # Chỉ khởi động Spring Boot khi MySQL đã pass Healthcheck
+    ports:
+      - "8093:8093"
+    environment:
+      # Kết nối tới MySQL qua tên service 'mysql-db'
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+    networks:
+      - my-network
+
+# ========================================================
+# Khai báo Network và Volume cấp cao nhất
+# ========================================================
+networks:
+  my-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+```
+
+3.3. CƠ CHẾ HEALTHCHECK & DEPENDS_ON (GIẢI PHÁP CHỐNG CRASH)
+----------------------------------------------------------------------------------------------------
+Vấn đề thường gặp: MySQL mất từ 10 - 20 giây để khởi tạo database. Nếu Spring Boot khởi động song song,
+nó sẽ cố kết nối vào MySQL khi MySQL chưa sẵn sàng -> Spring Boot bị văng lỗi `Communications link failure`
+hoặc `Connection refused` và tự động tắt (Crash).
+
+Giải pháp:
+1. Trên `mysql-db`: Dùng lệnh `mysqladmin ping` định kỳ 5s/lần để kiểm tra trạng thái sống của DB.
+2. Trên `product-service`: Cấu hình:
+   depends_on:
+     mysql-db:
+       condition: service_healthy
+   -> Docker Compose sẽ giữ container Spring Boot ở trạng thái chờ. Chỉ khi nào MySQL phản hồi `healthy`,
+      Spring Boot mới chính thức khởi động. Điều này đảm bảo hệ thống luôn khởi chạy thành công 100%!
+
+3.4. CÁC LỆNH VẬN HÀNH DOCKER COMPOSE THƯỜNG DÙNG
+----------------------------------------------------------------------------------------------------
+- Khởi động toàn bộ hệ sinh thái (Tự động build lại image nếu có thay đổi):
+  docker compose up -d --build
+
+- Xem trạng thái và thông tin port các service:
+  docker compose ps
+
+- Xem log hoạt động theo thời gian thực (tất cả các service):
+  docker compose logs -f
+
+- Xem log riêng của một service cụ thể:
+  docker compose logs -f product-service
+  docker compose logs -f mysql-db
+
+- Dừng và xóa containers, networks (NHƯNG VẪN GIỮ NGUYÊN DỮ LIỆU VOLUME):
+  docker compose down
+
+- Dừng hệ thống và XÓA SẠCH CẢ VOLUME (Dùng khi muốn reset database về ban đầu):
+  docker compose down -v
+
+
+====================================================================================================
+PHẦN 4: THIẾT LẬP PIPELINE CI/CD TỰ ĐỘNG HÓA VỚI GITHUB ACTIONS
+====================================================================================================
+
+4.1. KIẾN TRÚC LUỒNG CI/CD
+----------------------------------------------------------------------------------------------------
+Quy trình CI/CD được chia thành 3 giai đoạn (Jobs) tuần tự và chặt chẽ:
+
+Git Push lên nhánh `main`
+       │
+       ▼
+┌────────────────────────────────────────────────────────┐
+│ JOB 1: Build & Test (CI)                               │
+│ - Chạy trên máy ảo Ubuntu Runner của GitHub            │
+│ - Tự khởi tạo MySQL 8.0 Service Container làm mock DB  │
+│ - Cài đặt JDK 21 Temurin + Bật Gradle Cache            │
+│ - Chạy Unit / Integration Tests (./gradlew test)       │
+│ - Lưu trữ Test Reports & file bootJar thành Artifact   │
+└────────────────────────────────────────────────────────┘
+       │ (Chỉ khi Test thành công)
+       ▼
+┌────────────────────────────────────────────────────────┐
+│ JOB 2: Build & Push Docker Image (CI)                  │
+│ - Kích hoạt Docker Buildx                              │
+│ - Đăng nhập Docker Hub bằng Secret Token               │
+│ - Build Multi-stage image (target: app)                │
+│ - Tận dụng GitHub Actions Layer Cache (type=gha)       │
+│ - Đẩy Image lên Docker Hub với 2 tag:                  │
+│   + :latest (phiên bản mới nhất)                       │
+│   + :sha-<git-commit-hash> (để dễ dàng Rollback)       │
+└────────────────────────────────────────────────────────┘
+       │ (Chỉ khi Push Image thành công)
+       ▼
+┌────────────────────────────────────────────────────────┐
+│ JOB 3: Deploy to VPS Server (CD)                       │
+│ - Kết nối SSH an toàn vào VPS bằng SSH Private Key     │
+│ - Kéo (Pull) image :latest vừa build về VPS            │
+│ - Dừng và xóa container product-service cũ             │
+│ - Khởi chạy container mới gắn mạng my-network          │
+│ - Dọn dẹp các Docker image rác cũ (dangling) trên VPS  │
+└────────────────────────────────────────────────────────┘
+
+4.2. HƯỚNG DẪN THIẾT LẬP SSH KEY PAIR (id_rsa / id_rsa.pub) KẾT NỐI VỚI VPS
+----------------------------------------------------------------------------------------------------
+Để GitHub Actions có thể SSH vào VPS của bạn mà KHÔNG cần dùng mật khẩu (vừa nguy hiểm vừa dễ bị block),
+chúng ta sử dụng cơ chế xác thực bằng cặp khóa công khai / riêng tư (Public/Private SSH Key).
+
+BƯỚC 1: TẠO CẶP KHÓA SSH (Thực hiện trên máy cá nhân hoặc trên VPS):
+Mở terminal (PowerShell trên Windows hoặc Terminal trên Linux/Mac):
+   ssh-keygen -t rsa -b 4096 -C "github-actions-deploy" -f "$HOME/.ssh/id_rsa_deploy"
+
+*(Khi được hỏi Passphrase, nhấn Enter 2 lần để để trống, giúp GitHub Actions tự động đăng nhập được).*
+Sau lệnh trên, bạn có 2 file trong thư mục `~/.ssh/`:
+- `id_rsa_deploy`: Khóa bí mật (Private Key) -> KHÔNG ĐƯỢC ĐỂ LỘ, dùng đưa vào GitHub Secrets.
+- `id_rsa_deploy.pub`: Khóa công khai (Public Key) -> Đưa lên VPS.
+
+BƯỚC 2: CÀI ĐẶT PUBLIC KEY LÊN MÁY CHỦ VPS
+Đăng nhập SSH vào VPS:
+   ssh <user>@<IP_VPS>
+
+Mở file `authorized_keys` và dán toàn bộ nội dung file `id_rsa_deploy.pub` vào cuối:
+   mkdir -p ~/.ssh
+   chmod 700 ~/.ssh
+   nano ~/.ssh/authorized_keys
+   # (Paste nội dung id_rsa_deploy.pub vào, lưu lại và thoát)
+   chmod 600 ~/.ssh/authorized_keys
+
+BƯỚC 3: LẤY NỘI DUNG PRIVATE KEY ĐỂ CẤU HÌNH VÀO GITHUB
+Trên máy cá nhân, mở file Private Key:
+- Trên Windows PowerShell:
+   Get-Content "$HOME\.ssh\id_rsa_deploy"
+- Trên Linux/Mac:
+   cat ~/.ssh/id_rsa_deploy
+
+Copy TOÀN BỘ nội dung, bao gồm cả hai dòng đầu và cuối:
+-----BEGIN OPENSSH PRIVATE KEY-----
+... toàn bộ nội dung mã hóa dài ngoằng ...
+-----END OPENSSH PRIVATE KEY-----
+
+4.3. HƯỚNG DẪN KẾT NỐI DOCKER HUB VÀ BẢO MẬT BIẾN MÔI TRƯỜNG VỚI GITHUB SECRETS
+----------------------------------------------------------------------------------------------------
+
+BƯỚC 1: LẤY ACCESS TOKEN TRÊN DOCKER HUB
+1. Đăng nhập vào https://hub.docker.com/
+2. Bấm vào Avatar góc trên cùng bên phải -> Chọn **Account Settings**.
+3. Chọn menu **Personal access tokens** bên trái -> Bấm **Generate new token**.
+4. Đặt tên token (ví dụ: `github-actions-token`), phân quyền chọn `Read & Write` -> Bấm **Generate**.
+5. Copy mã token vừa hiển thị (dạng `dckr_pat_...`). Lưu ý: Chỉ hiển thị 1 lần duy nhất!
+
+BƯỚC 2: THIẾT LẬP REPOSITORY SECRETS TRÊN GITHUB
+1. Truy cập vào kho mã nguồn (Repository) của bạn trên GitHub.
+2. Bấm vào tab **Settings** -> Danh mục bên trái chọn **Secrets and variables** -> Chọn **Actions**.
+3. Nhấn nút xanh **New repository secret** và lần lượt tạo 5 biến bí mật:
+
+   + Secret 1:
+     - Name: `DOCKERHUB_USERNAME`
+     - Secret: Điền username Docker Hub của bạn (ví dụ: `nguyentatho`, `nttho`).
+   + Secret 2:
+     - Name: `DOCKERHUB_TOKEN`
+     - Secret: Dán chuỗi Personal Access Token (`dckr_pat_...`) vừa tạo ở Bước 1.
+   + Secret 3:
+     - Name: `SSH_HOST`
+     - Secret: Địa chỉ IP của VPS (ví dụ: `103.72.57.95`).
+   + Secret 4:
+     - Name: `SSH_USER`
+     - Secret: Tên user đăng nhập trên VPS (ví dụ: `nttho` hoặc `root`).
+   + Secret 5:
+     - Name: `SSH_PRIVATE_KEY`
+     - Secret: Dán toàn bộ nội dung Private Key (`-----BEGIN OPENSSH PRIVATE KEY-----` ...).
+   + Secret 6 (Tùy chọn):
+     - Name: `SSH_PORT`
+     - Secret: Cổng SSH của VPS (mặc định là `22`).
+
+4.4. PHÂN TÍCH CHI TIẾT MÃ NGUỒN WORKFLOW GITHUB ACTIONS
+----------------------------------------------------------------------------------------------------
+File cấu hình nằm tại: `.github/workflows/cicd.yml`
+
+```yaml
+name: CI/CD - Spring Boot & Docker Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Cho phép kích hoạt thủ công bằng nút bấm trên giao diện GitHub
+
+env:
+  IMAGE_NAME: product-service
+
+jobs:
+  # ========================================================
+  # JOB 1: Test & Build mã nguồn Spring Boot bằng Gradle
+  # ========================================================
+  build-and-test:
+    name: Build & Test (Java 21)
+    runs-on: ubuntu-latest
+
+    # Khởi tạo MySQL service container trên GitHub runner phục vụ chạy Test
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: productdb
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -proot" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: 1. Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: 2. Cài đặt Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle' # Tự động cache Gradle dependencies
+
+      - name: 3. Cấp quyền thực thi cho Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: 4. Chạy Unit Tests
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+          SPRING_DATASOURCE_USERNAME: root
+          SPRING_DATASOURCE_PASSWORD: root
+        run: ./gradlew test
+
+      - name: 5. Lưu báo cáo Test (Test Report Artifact)
+        uses: actions/upload-artifact@v4
+        if: always() # Luôn lưu dù pass hay fail để kiểm tra nguyên nhân
+        with:
+          name: test-reports
+          path: build/reports/tests/test/
+          retention-days: 7
+
+      - name: 6. Build file Boot JAR
+        run: ./gradlew bootJar -x test --no-daemon
+
+      - name: 7. Lưu trữ file JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+          retention-days: 7
+
+  # ========================================================
+  # JOB 2: Build & Push Docker Image lên Docker Hub
+  # ========================================================
+  docker-build:
+    name: Build & Push Docker Image
+    needs: build-and-test # Chỉ chạy khi Job 1 thành công
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: 2. Cài đặt Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 3. Đăng nhập Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 4. Tạo metadata & tag cho Docker Image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+
+      - name: 5. Build và Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha # Tận dụng bộ nhớ đệm của GitHub Actions
+          cache-to: type=gha,mode=max
+
+  # ========================================================
+  # JOB 3: Tự động Deploy lên Server VPS qua SSH
+  # ========================================================
+  deploy:
+    name: Deploy to VPS Server
+    needs: docker-build # Chỉ chạy khi đã push Image thành công
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' # Chỉ deploy khi đẩy vào nhánh main
+
+    steps:
+      - name: Thực thi kịch bản Deploy trên VPS qua SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            echo "=================================================="
+            echo " BẮT ĐẦU QUY TRÌNH DEPLOY LÊN VPS: $(date)"
+            echo "=================================================="
+
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+
+            # 1. Kéo Image mới nhất từ Docker Hub về VPS
+            echo "-> 1. Đang pull image: $IMAGE..."
+            docker pull $IMAGE
+
+            # 2. Dừng và xóa container cũ
+            echo "-> 2. Dừng container cũ..."
+            docker stop ${{ env.IMAGE_NAME }} 2>/dev/null || true
+            docker rm ${{ env.IMAGE_NAME }} 2>/dev/null || true
+
+            # 3. Đảm bảo mạng my-network đã tồn tại
+            echo "-> 3. Kiểm tra Docker Network..."
+            docker network create my-network 2>/dev/null || true
+
+            # 4. Khởi chạy container mới
+            echo "-> 4. Khởi chạy container ${{ env.IMAGE_NAME }} mới trên port 8093..."
+            docker run -d \
+              --name ${{ env.IMAGE_NAME }} \
+              --restart always \
+              --network my-network \
+              -p 8093:8093 \
+              -e SPRING_DATASOURCE_URL="jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true" \
+              -e SPRING_DATASOURCE_USERNAME=root \
+              -e SPRING_DATASOURCE_PASSWORD=root \
+              $IMAGE
+
+            # 5. Dọn dẹp image rác không còn dùng
+            echo "-> 5. Dọn dẹp Docker images rác..."
+            docker image prune -f
+
+            echo "=================================================="
+            echo " DEPLOY HOÀN TẤT THÀNH CÔNG!"
+            echo " Trạng thái container:"
+            docker ps --filter "name=${{ env.IMAGE_NAME }}"
+            echo "=================================================="
+```
+
+4.5. HƯỚNG DẪN KÍCH HOẠT VÀ KIỂM TRA PIPELINE
+----------------------------------------------------------------------------------------------------
+Khi bạn đã hoàn tất cấu hình Secrets và code:
+1. Commit và push lên nhánh main:
+   git add .
+   git commit -m "feat(cicd): update deploy script"
+   git push origin main
+
+2. Mở trình duyệt vào tab **Actions** của repository GitHub:
+   - Bạn sẽ thấy quy trình chạy qua 3 bước:
+     + Step 1: Build & Test (Java 21) -> Xanh lục
+     + Step 2: Build & Push Docker Image -> Xanh lục
+     + Step 3: Deploy to VPS Server -> Xanh lục
+
+3. Kiểm tra kết quả trực tiếp từ VPS:
+   curl http://<IP_VPS>:8093/api/products
+
+
+====================================================================================================
+PHẦN 5: TỔNG HỢP CẨM NANG TOÀN BỘ CÂU LỆNH QUẢN LÝ DOCKER (CHEAT SHEET)
+====================================================================================================
+
+5.1. NHÓM LỆNH QUẢN LÝ DOCKER IMAGES (BUILD, PULL, PUSH, XÓA)
+----------------------------------------------------------------------------------------------------
+- Build image từ Dockerfile trong thư mục hiện tại:
+  docker build -t <tên_image>:<tag> .
+
+- Build riêng 1 stage cụ thể trong multi-stage Dockerfile:
+  docker build --target <tên_stage> -t <tên_image>:<tag> .
+
+- Build không sử dụng cache (ép build lại toàn bộ từ đầu):
+  docker build --no-cache -t <tên_image>:<tag> .
+
+- Liệt kê toàn bộ các images đang có trên máy:
+  docker images
+  (hoặc: docker image ls)
+
+- Đặt tag mới cho một image đã có:
+  docker tag <image_gốc>:<tag_gốc> <username_dockerhub>/<image_mới>:<tag_mới>
+  Ví dụ: docker tag product-service:v1 nttho/product-service:latest
+
+- Đẩy image lên Docker Hub:
+  docker push <username_dockerhub>/<tên_image>:<tag>
+
+- Tải image từ Docker Hub về máy:
+  docker pull <tên_image>:<tag>
+
+- Xóa một hoặc nhiều image:
+  docker rmi <tên_hoặc_id_image>
+  (hoặc: docker image rm <tên_image>)
+
+- Ép xóa image (ngay cả khi đang được container tham chiếu):
+  docker rmi -f <tên_image>
+
+- Dọn dẹp tất cả image không còn được gắn tag hoặc không dùng (dangling images):
+  docker image prune -f
+
+- Xem lịch sử các layer tạo nên image:
+  docker history <tên_image>
+
+- Xem chi tiết thông số metadata của image (dạng JSON):
+  docker image inspect <tên_image>
+
+5.2. NHÓM LỆNH QUẢN LÝ DOCKER CONTAINERS (RUN, LOGS, EXEC, STOP, XÓA)
+----------------------------------------------------------------------------------------------------
+- Khởi chạy một container mới từ image:
+  docker run [các_tùy_chọn] <tên_image>
+
+  * Các tùy chọn (flags) quan trọng nhất:
+    -d                   : Chạy ngầm trong nền (detached mode).
+    --name <tên>         : Đặt tên cho container.
+    -p <port_host>:<port_container> : Ánh xạ cổng (port forwarding).
+    -e KEY=VALUE         : Truyền biến môi trường.
+    --network <tên_mạng> : Gắn container vào mạng nội bộ cụ thể.
+    -v <volume>:<đường_dẫn_trong_container> : Gắn volume hoặc thư mục host vào container.
+    --restart always     : Tự động khởi động lại container khi bị crash hoặc khi server reboot.
+
+- Xem danh sách các container ĐANG CHẠY:
+  docker ps
+
+- Xem TẤT CẢ các container (bao gồm cả container đã tắt, bị lỗi):
+  docker ps -a
+
+- Dừng một container đang chạy:
+  docker stop <tên_hoặc_id_container>
+
+- Bật lại một container đã dừng:
+  docker start <tên_hoặc_id_container>
+
+- Khởi động lại container (Restart):
+  docker restart <tên_hoặc_id_container>
+
+- Xóa một container đã dừng:
+  docker rm <tên_hoặc_id_container>
+
+- Buộc dừng ngay lập tức và XÓA container (kể cả đang chạy):
+  docker rm -f <tên_hoặc_id_container>
+
+- Xem log hoạt động của container:
+  docker logs <tên_container>
+
+- Xem log trực tiếp theo thời gian thực (Follow log - rất hay dùng):
+  docker logs -f <tên_container>
+
+- Xem 100 dòng log cuối cùng:
+  docker logs --tail 100 -f <tên_container>
+
+- Truy cập vào bên trong một container đang chạy (chạy terminal shell):
+  docker exec -it <tên_container> sh
+  (hoặc nếu container có bash: docker exec -it <tên_container> bash)
+
+- Chạy một lệnh đơn lẻ trực tiếp bên trong container mà không cần mở shell:
+  docker exec -it <tên_container> mysql -u root -proot -e "SHOW DATABASES;"
+
+- Xem thống kê tiêu thụ tài nguyên (CPU, RAM, Network I/O) theo thời gian thực:
+  docker stats
+
+- Xem các tiến trình đang chạy bên trong container:
+  docker top <tên_container>
+
+- Dọn dẹp toàn bộ container đã tắt (Exited):
+  docker container prune -f
+
+5.3. NHÓM LỆNH QUẢN LÝ DOCKER NETWORK (KẾT NỐI MẠNG NỘI BỘ)
+----------------------------------------------------------------------------------------------------
+- Tạo một mạng bridge mới:
+  docker network create <tên_network>
+  Ví dụ: docker network create my-network
+
+- Liệt kê tất cả các mạng Docker:
+  docker network ls
+
+- Xem chi tiết thông số của mạng (IP, danh sách container đang tham gia):
+  docker network inspect <tên_network>
+  Ví dụ: docker network inspect my-network
+
+- Kết nối một container đang chạy vào mạng:
+  docker network connect <tên_network> <tên_container>
+
+- Ngắt kết nối một container ra khỏi mạng:
+  docker network disconnect <tên_network> <tên_container>
+
+- Xóa một mạng (chỉ xóa được khi không còn container nào nằm trong mạng):
+  docker network rm <tên_network>
+
+- Dọn dẹp tất cả các mạng không còn container nào sử dụng:
+  docker network prune -f
+
+5.4. NHÓM LỆNH QUẢN LÝ DOCKER VOLUME (LƯU TRỮ DỮ LIỆU)
+----------------------------------------------------------------------------------------------------
+- Tạo mới một volume:
+  docker volume create <tên_volume>
+  Ví dụ: docker volume create mysql-data
+
+- Liệt kê toàn bộ các volume đang có:
+  docker volume ls
+
+- Xem chi tiết volume (đường dẫn thư mục lưu trữ thật trên máy host - Mountpoint):
+  docker volume inspect <tên_volume>
+  Ví dụ: docker volume inspect mysql-data
+
+- Xóa một volume:
+  docker volume rm <tên_volume>
+  *(Lưu ý: Chỉ xóa được khi không có container nào - kể cả container đã dừng - đang gắn nó).*
+
+- Dọn dẹp toàn bộ các volume mồ côi (không còn container nào dùng):
+  docker volume prune -f
+
+5.5. NHÓM LỆNH BẢO TRÌ & GIẢI PHÓNG TÀI NGUYÊN HỆ THỐNG (SYSTEM CLEANUP)
+----------------------------------------------------------------------------------------------------
+- Xem tổng dung lượng ổ cứng mà Docker đang sử dụng (Images, Containers, Volumes, Build Cache):
+  docker system df
+
+- Xem chi tiết từng mục dung lượng:
+  docker system df -v
+
+- Dọn dẹp an toàn các tài nguyên rác (Containers đã tắt, networks không dùng, dangling images):
+  docker system prune -f
+
+- DỌN DẸP TRIỆT ĐỂ (Tất cả container đã tắt, tất cả image không dùng, build cache):
+  docker system prune -a -f
+
+- DỌN DẸP SẠCH TOÀN BỘ (Bao gồm CẢ VOLUME MỒ CÔI - Hãy cẩn thận khi dùng lệnh này):
+  docker system prune -a --volumes -f
+
+====================================================================================================
+                             --- HẾT TÀI LIỆU HƯỚNG DẪN ---
+====================================================================================================

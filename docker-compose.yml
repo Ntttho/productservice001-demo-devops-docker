@@ -1,0 +1,66 @@
+services:
+  # ========================================================
+  # Service 1: MySQL Database
+  # ========================================================
+  mysql-db:
+    # container mysql-db
+    image: mysql:8.0 # image mysql-db
+    container_name: mysql-db # tên container mysql-db
+    restart: always # tự động khởi động lại khi bị lỗi
+    environment:
+      MYSQL_ROOT_PASSWORD: root # mật khẩu root
+      MYSQL_DATABASE: productdb # tên database
+    ports:
+      - "3306:3306"
+    volumes:
+      # [DOCKER VOLUME]: Lưu dữ liệu bền vững, không mất khi container bị xóa
+      - mysql-data:/var/lib/mysql
+      # [BIND MOUNT]: Mount file SQL khởi tạo dữ liệu mẫu khi container chạy lần đầu
+      - ./src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - my-network
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ========================================================
+  # Service 2: Spring Boot Backend Application
+  # ========================================================
+  product-service:
+    # container product-service
+    build:
+      # build image
+      context: . # build từ thư mục hiện tại
+      dockerfile: Dockerfile # sử dụng Dockerfile
+      target: app # build image ở stage 'app'
+    container_name: product-service # tên container product-service
+    restart: always
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # Kết nối tới MySQL thông qua hostname chính là tên service 'mysql-db'
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+    # gán cho container product-service vào network my-network
+    networks:
+      - my-network
+
+# ========================================================
+# Cấu hình Docker Network chung cho các service
+# ========================================================
+networks:
+  my-network:
+    driver: bridge
+
+# ========================================================
+# Cấu hình Docker Volume lưu trữ database
+# ========================================================
+volumes:
+  mysql-data:

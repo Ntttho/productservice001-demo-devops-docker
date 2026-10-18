@@ -265,3 +265,129 @@ docker rmi my-spring-image my-mysql-image
 | **Gắn volume vào container** | `-v <tên-volume>:<đường-dẫn-trong-container>` |
 | **Xem log container** | `docker logs -f <tên-container>` |
 | **Xóa container đang chạy** | `docker rm -f <tên-container>` |
+
+---
+
+## 7. Nâng Cấp Lên Docker Compose (Tự Động Hóa Chuyên Nghiệp)
+
+### 7.1. Tại sao cần Docker Compose?
+Trong bài thực hành trên, bạn phải gõ thủ công rất nhiều lệnh:
+1. `docker network create ...`
+2. `docker volume create ...`
+3. `docker build ...`
+4. `docker run mysql-db ...`
+5. `docker run product-service ...`
+
+**Docker Compose** giải quyết toàn bộ sự phức tạp này:
+* Gom toàn bộ cấu hình container, biến môi trường, network, volume vào **duy nhất 1 file** [docker-compose.yml](file:///d:/devops/session10-springboot/docker-compose.yml).
+* Khởi động toàn bộ hệ sinh thái chỉ bằng **1 dòng lệnh duy nhất**: `docker compose up -d`.
+
+---
+
+### 7.2. Cấu Trúc File `docker-compose.yml`
+
+File [docker-compose.yml](file:///d:/devops/session10-springboot/docker-compose.yml) trong dự án được tổ chức như sau:
+
+```yaml
+services:
+  # Service 1: MySQL Database
+  mysql-db:
+    image: mysql:8.0
+    container_name: mysql-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: productdb
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./src/main/resources/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - my-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Service 2: Spring Boot Backend
+  product-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    container_name: product-service
+    restart: always
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+    networks:
+      - my-network
+
+networks:
+  my-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+```
+
+> **Điểm đặc biệt (Best Practice):** Cấu hình `healthcheck` trên `mysql-db` kết hợp với `condition: service_healthy` trên `product-service` giúp Spring Boot **chờ cho đến khi MySQL khởi động hoàn tất 100%** thì mới bật lên, loại bỏ hoàn toàn lỗi crash do kết nối database quá sớm!
+
+---
+
+### 7.3. Các Lệnh Thực Hành Với Docker Compose
+
+#### 1. Khởi động toàn bộ hệ thống (Build image + Tạo network + Tạo volume + Chạy container):
+```bash
+docker compose up -d --build
+```
+
+#### 2. Kiểm tra trạng thái các container đang chạy:
+```bash
+docker compose ps
+```
+
+#### 3. Xem log hoạt động theo thời gian thực:
+```bash
+# Xem log của toàn bộ hệ thống:
+docker compose logs -f
+
+# Xem riêng log của Spring Boot:
+docker compose logs -f product-service
+
+# Xem riêng log của MySQL:
+docker compose logs -f mysql-db
+```
+*(Nhấn `Ctrl + C` để thoát màn hình xem log).*
+
+#### 4. Kiểm tra API:
+```bash
+curl http://localhost:8080/api/products
+```
+
+#### 5. Thử nghiệm Volume với Docker Compose:
+* **Dừng và xóa các container:**
+  ```bash
+  docker compose down
+  ```
+* **Bật lại hệ thống:**
+  ```bash
+  docker compose up -d
+  ```
+  $\rightarrow$ Truy cập lại `http://localhost:8080/api/products`, dữ liệu vẫn còn nguyên vẹn vì volume `mysql-data` không bị xóa khi chạy `docker compose down`.
+
+#### 6. Dừng hệ thống và XÓA SẠCH DỮ LIỆU VOLUME (Reset từ đầu):
+```bash
+docker compose down -v
+```
+*(Cờ `-v` sẽ xóa sạch cả volume `mysql-data`).*
+

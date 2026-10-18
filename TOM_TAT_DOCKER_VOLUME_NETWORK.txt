@@ -1,0 +1,203 @@
+================================================================================
+          TÓM TẮT LÝ THUYẾT & THỰC HÀNH: DOCKER VOLUME & DOCKER NETWORK
+================================================================================
+
+I. TỔNG QUAN LÝ THUYẾT CỐT LÕI
+
+1. DOCKER VOLUME (LƯU TRỮ BỀN VỮNG)
+- Vấn đề: Container mặc định có tính chất tạm thời (ephemeral / stateless). Khi container
+  bị xóa (docker rm), toàn bộ dữ liệu sinh ra bên trong container cũng bị xóa sạch theo.
+- Giải pháp: Docker Volume được sinh ra để:
+  + Lưu trữ dữ liệu bền vững (Data Persistence): Dữ liệu được ghi trực tiếp vào ổ đĩa của máy host,
+    nằm ngoài vòng đời của container.
+  + Chia sẻ dữ liệu: Nhiều container có thể cùng gắn (mount) vào 1 volume.
+  + Độc lập và an toàn: Khi container bị dừng, xóa, nâng cấp phiên bản mới thì dữ liệu
+    vẫn còn nguyên vẹn 100%.
+
+2. DOCKER NETWORK (KẾT NỐI MẠNG GIỮA CÁC CONTAINER)
+- Vấn đề: Nếu không cấu hình mạng chung, các container sẽ chạy cô lập hoàn toàn hoặc nằm
+  ở mạng bridge mặc định không hỗ trợ phân giải tên miền (DNS) của nhau.
+- Giải pháp: Docker Network (User-defined Bridge Network) giúp:
+  + Giao tiếp nội bộ: Các container trong cùng mạng có thể gọi nhau an toàn mà không cần
+    phải expose port ra ngoài Internet.
+  + Phân giải tên miền tự động (Automatic DNS Resolution): Các container có thể kết nối
+    với nhau bằng chính TÊN CONTAINER (ví dụ: host 'mysql-db') thay vì phải dùng IP động.
+  + Cách ly và bảo mật: Tách biệt các nhóm dịch vụ khác nhau vào các mạng riêng biệt.
+
+================================================================================
+II. BẢNG TRA CỨU CÁC LỆNH DOCKER THƯỜNG DÙNG
+
+1. CÁC LỆNH DOCKER VOLUME
+- Liệt kê các volume:
+  docker volume ls
+
+- Tạo mới một volume:
+  docker volume create <tên_volume>
+  Ví dụ: docker volume create mysql-data
+
+- Xem thông tin chi tiết của volume (nơi lưu trữ trên máy host):
+  docker volume inspect <tên_volume>
+  Ví dụ: docker volume inspect mysql-data
+
+- Xóa một volume (chỉ xóa được khi không có container nào đang gắn nó):
+  docker volume rm <tên_volume>
+
+- Dọn dẹp tất cả volume "mồ côi" (không còn container nào dùng):
+  docker volume prune -f
+
+2. CÁC LỆNH DOCKER NETWORK
+- Tạo mạng bridge riêng do người dùng tự định nghĩa:
+  docker network create <tên_network>
+  Ví dụ: docker network create my-network
+
+- Xem danh sách các mạng:
+  docker network ls
+
+- Xem chi tiết mạng (danh sách container và IP nội bộ đang kết nối vào mạng):
+  docker network inspect <tên_network>
+  Ví dụ: docker network inspect my-network
+
+- Gắn (connect) một container đang chạy vào mạng:
+  docker network connect <tên_network> <tên_container>
+
+- Ngắt (disconnect) một container ra khỏi mạng:
+  docker network disconnect <tên_network> <tên_container>
+
+- Xóa mạng (chỉ xóa được khi không còn container nào trong mạng):
+  docker network rm <tên_network>
+
+================================================================================
+III. QUY TRÌNH THỰC HÀNH TỪ A ĐẾN Z (SPRING BOOT + MYSQL)
+
+BƯỚC 1: TẠO NETWORK VÀ VOLUME
+--------------------------------------------------------------------------------
+# 1.1. Tạo mạng chung cho database và backend
+docker network create my-network
+
+# 1.2. Tạo volume để lưu database MySQL lâu dài
+docker volume create mysql-data
+
+
+BƯỚC 2: CHẠY CONTAINER MYSQL (GẮN NETWORK & VOLUME)
+--------------------------------------------------------------------------------
+docker run -d \
+  --name mysql-db \
+  --network my-network \
+  -v mysql-data:/var/lib/mysql \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=productdb \
+  -p 3306:3306 \
+  mysql:8.0
+
+* Giải thích các tham số:
+  -d                             : Chạy ngầm (detached mode)
+  --name mysql-db                : Đặt tên container là mysql-db (dùng làm hostname nội bộ)
+  --network my-network           : Gắn vào mạng my-network
+  -v mysql-data:/var/lib/mysql   : Gắn volume mysql-data vào thư mục lưu trữ của MySQL
+  -e MYSQL_ROOT_PASSWORD=root    : Mật khẩu tài khoản root
+  -e MYSQL_DATABASE=productdb    : Tên database tạo sẵn
+  -p 3306:3306                   : Mở port 3306 ra ngoài host để dễ kết nối từ tool (DBeaver,...)
+
+
+BƯỚC 3: NẠP DỮ LIỆU MẪU VÀO MYSQL (MOCK DATA)
+--------------------------------------------------------------------------------
+# 3.1. Đợi khoảng 10-15s cho MySQL sẵn sàng, nạp file SQL từ máy ngoài vào container:
+docker exec -i mysql-db mysql -u root -proot < src/main/resources/db/init.sql
+
+# 3.2. Kiểm tra xem dữ liệu đã vào bảng products chưa:
+docker exec -it mysql-db mysql -u root -proot -e "USE productdb; SELECT * FROM products;"
+
+
+BƯỚC 4: BUILD VÀ CHẠY CONTAINER SPRING BOOT
+--------------------------------------------------------------------------------
+# 4.1. Build image cho Spring Boot (chạy tại thư mục chứa Dockerfile):
+docker build -t product-service-image:v2 .
+
+# 4.2. Chạy container Spring Boot (gắn cùng mạng my-network):
+docker run -d \
+  --name product-service \
+  --network my-network \
+  -p 8080:8080 \
+  -e SPRING_DATASOURCE_URL="jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true" \
+  -e SPRING_DATASOURCE_USERNAME=root \
+  -e SPRING_DATASOURCE_PASSWORD=root \
+  product-service-image:v2
+
+* Điểm cốt lõi:
+  SPRING_DATASOURCE_URL trỏ tới hostname "mysql-db". Nhờ có mạng "my-network",
+  Spring Boot tự động tìm thấy container MySQL theo tên mà không cần biết địa chỉ IP!
+
+
+BƯỚC 5: KIỂM TRA KẾT QUẢ VÀ LOGS
+--------------------------------------------------------------------------------
+# 5.1. Xem log Spring Boot:
+docker logs -f product-service
+
+# 5.2. Gọi API kiểm tra danh sách sản phẩm:
+curl http://localhost:8080/api/products
+
+
+BƯỚC 6: THÍ NGHIỆM KIỂM CHỨNG DOCKER VOLUME (QUAN TRỌNG)
+--------------------------------------------------------------------------------
+# 6.1. Xóa hoàn toàn container MySQL đang chạy:
+docker rm -f mysql-db
+
+# 6.2. Tạo lại một container MySQL mới tinh, vẫn mount vào volume cũ:
+docker run -d \
+  --name mysql-db \
+  --network my-network \
+  -v mysql-data:/var/lib/mysql \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=productdb \
+  -p 3306:3306 \
+  mysql:8.0
+
+# 6.3. Gọi lại API:
+curl http://localhost:8080/api/products
+
+=> KẾT QUẢ: Dữ liệu vẫn còn nguyên vẹn 100%!
+   Điều này chứng minh volume mysql-data đã lưu giữ dữ liệu an toàn trên máy host,
+   hoàn toàn độc lập với vòng đời của container.
+
+================================================================================
+IV. CÁC LỖI THƯỜNG GẶP VÀ CÁCH KHẮC PHỤC
+--------------------------------------------------------------------------------
+1. Lỗi: "volume is in use - [...]"
+   -> Nguyên nhân: Volume đang được gắn vào một container (kể cả container đã dừng).
+   -> Cách sửa: Xóa container trước (docker rm -f <tên_hoặc_id>), sau đó mới xóa volume.
+
+2. Lỗi: "container ... is not running" khi chạy docker exec
+   -> Nguyên nhân: Container đã bị tắt hoặc crash do sai cấu hình ban đầu.
+   -> Cách sửa: Kiểm tra bằng "docker ps -a" và "docker logs <tên_container>".
+      Sau đó xóa container cũ (docker rm -f) và khởi chạy lại với cấu hình đúng.
+
+3. Lỗi: "Unable to find image '...' locally / pull access denied"
+   -> Nguyên nhân: Chưa build image trên máy hoặc gõ sai tag name.
+   -> Cách sửa: Chạy "docker build -t <tên_image> ." trước khi "docker run".
+
+4. Lỗi: Lệnh nhiều dòng có dấu gạch chéo ngược "\" bị lỗi cú pháp
+   -> Nguyên nhân: Quên dấu cách trước dấu "\", hoặc sau dấu "\" có khoảng trắng thừa.
+   -> Cách sửa: Đảm bảo có 1 dấu cách trước dấu "\", hoặc viết gộp lệnh trên 1 dòng duy nhất.
+
+================================================================================
+V. NÂNG CẤP VỚI DOCKER COMPOSE (QUẢN LÝ TỰ ĐỘNG HÓA)
+--------------------------------------------------------------------------------
+1. Khởi động toàn bộ (Build + Network + Volume + Run):
+   docker compose up -d --build
+
+2. Kiểm tra trạng thái các container:
+   docker compose ps
+
+3. Xem logs toàn bộ:
+   docker compose logs -f
+
+4. Xem logs riêng service:
+   docker compose logs -f product-service
+   docker compose logs -f mysql-db
+
+5. Dừng hệ thống (Giữ lại dữ liệu volume):
+   docker compose down
+
+6. Dừng hệ thống và XÓA SẠCH DỮ LIỆU volume:
+   docker compose down -v
+================================================================================

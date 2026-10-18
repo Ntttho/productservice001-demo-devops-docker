@@ -1,12 +1,12 @@
-# ========================================================
-# Stage 1: Build Image MySQL chứa sẵn dữ liệu mẫu (Mock data)
-# Lệnh build: docker build --target mysql-db -t my-mysql-image .
-# ========================================================
-FROM mysql:8.0 AS mysql-db
-ENV MYSQL_ROOT_PASSWORD=root
-ENV MYSQL_DATABASE=productdb
-# Copy file SQL vào thư mục init của MySQL, MySQL sẽ tự động chạy script này khi container khởi tạo
-COPY src/main/resources/db/init.sql /docker-entrypoint-initdb.d/
+# # ========================================================
+# # Stage 1: Build Image MySQL chứa sẵn dữ liệu mẫu (Mock data)
+# # Lệnh build: docker build --target mysql-db -t my-mysql-image .
+# # ========================================================
+# FROM mysql:8.0 AS mysql-db
+# ENV MYSQL_ROOT_PASSWORD=root
+# ENV MYSQL_DATABASE=productdb
+# # Copy file SQL vào thư mục init của MySQL, MySQL sẽ tự động chạy script này khi container khởi tạo
+# COPY src/main/resources/db/init.sql /docker-entrypoint-initdb.d/
 
 # ========================================================
 # Stage 2: Build file JAR ứng dụng Spring Boot bằng Gradle

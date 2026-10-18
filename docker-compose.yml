@@ -42,7 +42,7 @@ services:
       mysql-db:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "8093:8093"
     environment:
       # Kết nối tới MySQL thông qua hostname chính là tên service 'mysql-db'
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true

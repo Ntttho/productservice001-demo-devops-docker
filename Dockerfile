@@ -40,7 +40,7 @@ WORKDIR /app
 COPY --from=build /app/build/libs/*.jar app.jar
 
 # Khai báo cổng ứng dụng
-EXPOSE 8080
+EXPOSE 8093
 
 # Cấu hình biến môi trường kết nối tới MySQL container
 # Chú ý: 'mysql-db' là hostname do Docker Network tự động phân giải qua tên container

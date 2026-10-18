@@ -1,4 +1,4 @@
-name: CI - Spring Boot & Docker Pipeline
+name: CI/CD - Spring Boot & Docker Pipeline
 
 on:
   push:
@@ -120,3 +120,81 @@ jobs:
           # Sử dụng GitHub Actions Cache để tăng tốc quá trình build docker layers
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ========================================================
+  # Job 3: Continuous Deployment (CD) - Tự động Deploy lên VPS
+  # ========================================================
+  deploy:
+    name: Deploy to VPS Server
+    needs: docker-build # Chỉ chạy khi build & push image Docker thành công
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' # Chỉ deploy tự động khi push/merge vào main
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+    steps:
+      - name: Kiểm tra cấu hình Secrets SSH
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "::warning ::Chưa cấu hình SSH_HOST hoặc SSH_PRIVATE_KEY trong GitHub Secrets. Bỏ qua bước Deploy."
+            echo "Cần thêm các Secrets sau vào GitHub: SSH_HOST, SSH_USER, SSH_PRIVATE_KEY"
+            exit 0
+          fi
+
+      - name: Thực thi Deploy lên VPS qua SSH
+        if: env.SSH_HOST != '' && env.SSH_PRIVATE_KEY != ''
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER || 'nttho' }}
+          key: ${{ env.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            echo "=================================================="
+            echo " BẮT ĐẦU QUY TRÌNH DEPLOY LÊN VPS: $(date)"
+            echo "=================================================="
+
+            # Xác định tên image Docker
+            if [ -n "${{ env.DOCKERHUB_USERNAME }}" ]; then
+              IMAGE="${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+            else
+              IMAGE="${{ env.IMAGE_NAME }}:latest"
+            fi
+
+            # 1. Pull Docker image mới nhất từ Docker Hub
+            echo "-> 1. Đang pull image mới nhất: $IMAGE..."
+            docker pull $IMAGE
+
+            # 2. Dừng và xóa container cũ (nếu có)
+            echo "-> 2. Dừng và xóa container product-service cũ..."
+            docker stop ${{ env.IMAGE_NAME }} 2>/dev/null || true
+            docker rm ${{ env.IMAGE_NAME }} 2>/dev/null || true
+
+            # 3. Đảm bảo mạng my-network đã tồn tại
+            echo "-> 3. Kiểm tra Docker Network..."
+            docker network create my-network 2>/dev/null || true
+
+            # 4. Khởi chạy container mới với image vừa tải về
+            echo "-> 4. Khởi chạy container ${{ env.IMAGE_NAME }} mới..."
+            docker run -d \
+              --name ${{ env.IMAGE_NAME }} \
+              --restart always \
+              --network my-network \
+              -p 8080:8080 \
+              -e SPRING_DATASOURCE_URL="jdbc:mysql://mysql-db:3306/productdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true" \
+              -e SPRING_DATASOURCE_USERNAME=root \
+              -e SPRING_DATASOURCE_PASSWORD=root \
+              $IMAGE
+
+            # 5. Dọn dẹp image dangling/rác để giải phóng ổ cứng server
+            echo "-> 5. Dọn dẹp Docker images rác..."
+            docker image prune -f
+
+            echo "=================================================="
+            echo " DEPLOY HOÀN TẤT THÀNH CÔNG!"
+            echo " Trạng thái container:"
+            docker ps --filter "name=${{ env.IMAGE_NAME }}"
+            echo "=================================================="

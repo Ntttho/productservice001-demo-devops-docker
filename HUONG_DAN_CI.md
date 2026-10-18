@@ -1,111 +1,120 @@
-# HƯỚNG DẪN CHI TIẾT QUY TRÌNH CI (CONTINUOUS INTEGRATION) VỚI GITHUB ACTIONS
+# HƯỚNG DẪN CHI TIẾT QUY TRÌNH CI/CD VỚI GITHUB ACTIONS
 
-Tài liệu này giải thích quy trình CI cho ứng dụng Spring Boot 4 + Java 21 + MySQL + Docker.
-
----
-
-## 1. CI (Continuous Integration) Là Gì?
-**CI (Tích hợp liên tục)** là quy trình tự động hóa việc kiểm tra, build mã nguồn và đóng gói ứng dụng mỗi khi lập trình viên thực hiện `git push` hoặc tạo `Pull Request`.
-
-Mục tiêu chính:
-- **Phát hiện lỗi sớm:** Tự động chạy Unit Test, nếu có bug sẽ báo đỏ ngay lập tức.
-- **Tính nhất quán:** Build trên môi trường độc lập (GitHub Runner) loại bỏ lỗi "chạy được trên máy tôi nhưng lỗi trên máy khác".
-- **Sẵn sàng bàn giao (CD):** Tạo sẵn Docker Image đóng gói hoàn chỉnh đưa lên Registry.
+Tài liệu này giải thích toàn bộ quy trình **CI (Continuous Integration)** và **CD (Continuous Deployment)** tự động cho ứng dụng **Spring Boot + MySQL + Docker** lên **VPS Server**.
 
 ---
 
-## 2. Kiến Trúc Pipeline CI Trong Dự Án Này
+## 1. Tổng Quan Về CI/CD
+
+- **CI (Continuous Integration - Tích hợp liên tục):**
+  - Tự động kiểm tra chất lượng code và chạy **Unit Tests** ngay khi có commit/pull request.
+  - Tự động biên dịch và build file JAR.
+  - Tự động đóng gói **Docker Image** và đẩy lên **Docker Hub**.
+- **CD (Continuous Deployment - Triển khai liên tục):**
+  - Tự động kết nối SSH vào **VPS Server** (`103.72.57.95`).
+  - Kéo Docker Image mới nhất từ Docker Hub về server.
+  - Khởi động lại container Spring Boot mà không làm mất dữ liệu Database.
+
+---
+
+## 2. Kiến Trúc Toàn Diện Của Pipeline CI/CD
 
 File cấu hình: [`.github/workflows/ci.yml`](file:///d:/devops/session10-springboot/.github/workflows/ci.yml)
 
 ```mermaid
-flowchart LR
-    A[Git Push / PR] --> B[Job 1: Build & Test]
-    subgraph Job 1: Build & Test
-        B1[Service: MySQL 8.0]
-        B2[Setup JDK 21]
-        B3[Gradle Cache]
-        B4[Run Unit Tests]
-        B5[Build BootJar]
-        B6[Upload Artifacts]
+flowchart TD
+    A[Git Push lên nhánh main] --> B[Job 1: Build & Test - CI]
+    
+    subgraph Job 1: Build & Test Java
+        B1[Khởi tạo MySQL 8.0 Service Container]
+        B2[Setup JDK 21 Temurin + Gradle Cache]
+        B3[Chạy Unit Tests ./gradlew test]
+        B4[Build BootJar & Lưu trữ Artifact]
     end
-    B --> C[Job 2: Docker Build & Push]
-    subgraph Job 2: Docker Build & Push
-        C1[Docker Buildx]
-        C2[GHA Layer Cache]
-        C3[Login Docker Hub]
-        C4[Build Image Stage 'app']
-        C5[Push Image :latest & :sha]
+    
+    B --> C[Job 2: Docker Build & Push - CI]
+    
+    subgraph Job 2: Build & Push Docker Image
+        C1[Docker Buildx + Cache GitHub Actions]
+        C2[Login Docker Hub qua Secrets]
+        C3[Build Multi-stage Dockerfile]
+        C4[Push Image :latest và :sha lên Docker Hub]
+    end
+    
+    C --> D[Job 3: Deploy lên VPS - CD]
+    
+    subgraph Job 3: Continuous Deployment
+        D1[Kết nối SSH vào VPS bằng Private Key]
+        D2[Docker pull image mới nhất từ Docker Hub]
+        D3[Dừng & xóa container product-service cũ]
+        D4[Chạy container mới trong mạng my-network]
+        D5[Dọn dẹp image rác trên VPS]
     end
 ```
 
 ---
 
-## 3. Chi Tiết Các Công Đoạn (Jobs & Steps)
+## 3. Các Bước Cấu Hình GitHub Secrets (Bắt Buộc Cho CI/CD)
 
-### Job 1: `build-and-test`
-1. **Khởi tạo MySQL Service Container:**
-   - Khi chạy test Spring Boot JPA, Spring Boot cần kết nối Database để kiểm tra Entity/Hibernate context.
-   - GitHub Actions tự động dựng một container `mysql:8.0` độc lập với cấu hình `MYSQL_DATABASE=productdb`.
-2. **Cài đặt JDK 21 & Gradle Cache:**
-   - Dùng Java 21 Eclipse Temurin.
-   - Cache các thư viện `.gradle` tự động giúp các lần chạy sau tiết kiệm từ 1-3 phút.
-3. **Thực thi Unit Test (`./gradlew test`):**
-   - Biến môi trường trỏ trực tiếp vào MySQL container: `jdbc:mysql://127.0.0.1:3306/productdb`.
-   - Báo cáo kết quả test (`test-reports`) luôn được lưu trữ lại trong mục Artifacts của GitHub Actions.
-4. **Đóng gói Boot JAR (`./gradlew bootJar`):**
-   - Tạo file `.jar` và lưu vào GitHub Artifacts (`app-jar`) để lưu trữ trong 7 ngày.
+Để pipeline có thể tự động đẩy Docker Image lên Docker Hub và SSH vào VPS để deploy, bạn cần thiết lập các Secret trên GitHub Repository.
 
-### Job 2: `docker-build` (Phụ thuộc Job 1 thành công)
-1. **Docker Buildx & GitHub Actions Cache (`type=gha`):**
-   - Cache lại các layer build (như Gradle dependencies trong Stage 1 của Dockerfile) trực tiếp trên GitHub runner.
-2. **Đăng nhập Docker Hub:**
-   - Sử dụng GitHub Secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`).
-   - *Lưu ý:* Nếu bạn chưa cấu hình secrets này, job vẫn build Docker image bình thường để kiểm tra tính hợp lệ của [Dockerfile](file:///d:/devops/session10-springboot/Dockerfile) mà không bị báo lỗi.
-3. **Build & Tag & Push:**
-   - Tag theo commit hash ngắn (ví dụ: `sha-a1b2c3d`) và tag `latest`.
-   - Khi merge vào nhánh `main`, image sẽ tự động được push lên Registry.
+### 3.1. Các Secret Cần Thiết:
+
+| Tên Secret | Ý nghĩa | Giá trị mẫu |
+| :--- | :--- | :--- |
+| `DOCKERHUB_USERNAME` | Tên tài khoản Docker Hub | Tên user Docker Hub của bạn |
+| `DOCKERHUB_TOKEN` | Access Token của Docker Hub | Mã `dckr_pat_...` (tạo từ Docker Hub) |
+| `SSH_HOST` | Địa chỉ IP của máy chủ VPS | `103.72.57.95` |
+| `SSH_USER` | Tên người dùng SSH trên VPS | `nttho` |
+| `SSH_PRIVATE_KEY` | Toàn bộ nội dung SSH Private Key | Nội dung file `$HOME\.ssh\id_rsa` |
+| `SSH_PORT` *(tùy chọn)* | Cổng SSH | `22` (mặc định) |
 
 ---
 
-## 4. Các Bước Cấu Hình GitHub Secrets (Để Push Lên Docker Hub)
+### 3.2. Cách Lấy Thông Tin & Thêm Vào GitHub:
 
-Nếu bạn muốn CI tự động push Docker Image lên Docker Hub của bạn:
+#### Bước 1: Lấy Docker Hub Access Token
+1. Truy cập [Docker Hub](https://hub.docker.com/) -> Đăng nhập.
+2. Bấm vào Avatar góc phải trên -> **Account Settings** -> **Personal access tokens**.
+3. Bấm **Generate new token**, đặt tên (vd: `github-actions-token`), chọn quyền `Read & Write` -> Bấm **Generate**.
+4. **Copy mã token** được tạo.
 
-1. **Lấy Access Token từ Docker Hub:**
-   - Truy cập: [Docker Hub](https://hub.docker.com/) -> Đăng nhập.
-   - Vào **Account Settings** -> **Security** -> **New Access Token**.
-   - Đặt tên (vd: `github-actions-ci`) -> Copy mã Token (chuỗi `dckr_pat_...`).
+#### Bước 2: Lấy SSH Private Key
+Trên máy cá nhân, mở PowerShell và copy toàn bộ nội dung:
+```powershell
+Get-Content "$HOME\.ssh\id_rsa"
+```
+*(Copy toàn bộ từ dòng `-----BEGIN OPENSSH PRIVATE KEY-----` đến hết dòng `-----END OPENSSH PRIVATE KEY-----`).*
 
-2. **Thêm Secret vào Repository trên GitHub:**
-   - Mở repository của bạn trên GitHub: `https://github.com/Ntttho/productservice001-demo-devops-docker`.
-   - Vào tab **Settings** -> Mục bên trái chọn **Secrets and variables** -> **Actions**.
-   - Bấm **New repository secret**:
-     - `DOCKERHUB_USERNAME`: Tên tài khoản Docker Hub của bạn.
-     - `DOCKERHUB_TOKEN`: Token vừa copy ở bước 1.
+#### Bước 3: Thêm Secrets vào GitHub Repository
+1. Mở repo GitHub: [https://github.com/Ntttho/productservice001-demo-devops-docker](https://github.com/Ntttho/productservice001-demo-devops-docker).
+2. Vào tab **Settings** -> Danh mục bên trái chọn **Secrets and variables** -> **Actions**.
+3. Bấm nút xanh **New repository secret** và lần lượt thêm:
+   - Secret 1: Name: `DOCKERHUB_USERNAME` -> Value: tên user của bạn
+   - Secret 2: Name: `DOCKERHUB_TOKEN` -> Value: token vừa copy ở Bước 1
+   - Secret 3: Name: `SSH_HOST` -> Value: `103.72.57.95`
+   - Secret 4: Name: `SSH_USER` -> Value: `nttho`
+   - Secret 5: Name: `SSH_PRIVATE_KEY` -> Value: nội dung khóa vừa copy ở Bước 2
 
 ---
 
-## 5. Cách Đẩy Mã Nguồn Lên GitHub Để Kích Hoạt CI
+## 4. Cách Kích Hoạt Và Theo Dõi Pipeline
 
-Mở terminal trong thư mục dự án và chạy các lệnh:
+Sau khi cấu hình Secrets xong, bạn chỉ cần commit và push:
 
-```bash
-# Kiểm tra file đã tạo
-git status
-
-# Thêm file workflow
+```powershell
 git add .github/workflows/ci.yml HUONG_DAN_CI.md
-
-# Commit
-git commit -m "feat(ci): add GitHub Actions CI pipeline for Spring Boot and Docker"
-
-# Đẩy lên GitHub
+git commit -m "feat(cicd): add complete CI/CD pipeline with auto deployment to VPS"
 git push origin main
 ```
 
-Sau khi push:
-1. Mở repo trên GitHub, bấm vào tab **Actions**.
-2. Bạn sẽ thấy workflow **"CI - Spring Boot & Docker Pipeline"** đang chạy.
-3. Bấm vào chi tiết để xem log trực tiếp từng bước của `build-and-test` và `docker-build`.
- 
+### Theo Dõi Quá Trình Chạy:
+1. Vào tab **Actions** trên GitHub.
+2. Bạn sẽ thấy 3 Job chạy lần lượt:
+   - ✅ **Build & Test (Java 21)**: Chạy test và đóng gói file JAR.
+   - ✅ **Build & Push Docker Image**: Đóng gói Docker và đẩy lên Docker Hub.
+   - ✅ **Deploy to VPS Server**: SSH vào VPS và triển khai container mới nhất!
+3. Sau khi Job Deploy hoàn tất, bạn có thể kiểm tra trực tiếp API từ trình duyệt:
+   ```
+   http://103.72.57.95:8080/api/products
+   ```
